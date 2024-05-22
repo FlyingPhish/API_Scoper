@@ -1,5 +1,5 @@
-
 import json
+import yaml
 import os
 import argparse
 
@@ -7,27 +7,27 @@ def identify_api_document(content):
     """
     Identify the type of the API documentation based on its content.
     """
-    if "swagger" in content:
+    if "swagger" in content or "openapi" in content:
         return "swagger"
     elif "info" in content and "item" in content:
         return "postman"
     else:
         return "unknown"
-    
+
 def analyze_api_file(file_path):
     """
     Analyze a given API documentation file and return details about it.
     """
     with open(file_path, 'r', encoding='utf-8') as f:
         content = json.load(f)
-    
-    if "swagger" in content:
-        return refined_parse_swagger_content(content)
-    elif "info" in content and "item" in content:
-        return refined_parse_postman_content(content)
+
+    if identify_api_document(content) == "swagger":
+        return parse_swagger_content(content)
+    elif identify_api_document(content) == "postman":
+        return parse_postman_content(content)
     else:
         return None
-    
+
 def analyze_directory(directory):
     results = {}
     errors = []
@@ -42,13 +42,13 @@ def analyze_directory(directory):
                 elif file.endswith('.yaml') or file.endswith('.yml'):
                     with open(os.path.join(directory, file), 'r', encoding='utf-8', errors='replace') as f:
                         content = yaml.safe_load(f)
-                
+
                 doc_type = identify_api_document(content)
-                
+
                 if doc_type == "postman":
-                    details = refined_parse_postman_content(content)
+                    details = parse_postman_content(content)
                 elif doc_type == "swagger":
-                    details = refined_parse_swagger_content(content)
+                    details = parse_swagger_content(content)
                 else:
                     details = {"message": "Unknown API documentation type."}
                 results[file] = details
@@ -57,8 +57,7 @@ def analyze_directory(directory):
 
     return results, errors
 
-
-def refined_parse_postman_content(content):
+def parse_postman_content(content):
     """
     Parse the content of a Postman collection to extract relevant details.
     """
@@ -77,13 +76,13 @@ def refined_parse_postman_content(content):
         },
         "Total Parameters": 0
     }
-    
+
     # Extract requests
     requests = extract_postman_items(content['item'])
-    
+
     # Populate details
     details["Total Requests/Endpoints"] = len(requests)
-    
+
     for request in requests:
         if isinstance(request, dict) and 'method' in request:
             method = request['method'].upper()
@@ -93,47 +92,67 @@ def refined_parse_postman_content(content):
 
     return details
 
-def refined_parse_swagger_content(content):
-    if not isinstance(content, dict):
-        return {
-            "Total Requests/Endpoints": 0,
-            "HTTP Methods Distribution": {},
-            "Total Parameters": 0
-        }
-
-    endpoints = []
-    methods_distribution = {
-        "GET": 0,
-        "POST": 0,
-        "PUT": 0,
-        "DELETE": 0,
-        "PATCH": 0,
-        "OPTIONS": 0,
-        "HEAD": 0,
-        "UNKNOWN": 0
+def parse_swagger_content(content):
+    """
+    Parse the content of a Swagger/OpenAPI document to extract relevant details.
+    """
+    # Initialize result details
+    details = {
+        "Total Requests/Endpoints": 0,
+        "HTTP Methods Distribution": {
+            "GET": 0,
+            "POST": 0,
+            "PUT": 0,
+            "DELETE": 0,
+            "PATCH": 0,
+            "HEAD": 0,
+            "OPTIONS": 0,
+            "UNKNOWN": 0
+        },
+        "Total Parameters": 0
     }
-    total_parameters = 0
 
     paths = content.get("paths", {})
-    if not isinstance(paths, dict):  # Ensure that paths is a dictionary
-        paths = {}
-    for path, info in paths.items():
-        if not isinstance(info, dict):  # Ensure that each path info is a dictionary
-            continue
-        endpoints.append(path)
-        for method, details in info.items():
-            if not isinstance(details, dict):  # Ensure that details for each method is a dictionary
-                continue
-            methods_distribution[method.upper()] = methods_distribution.get(method.upper(), 0) + 1
-            parameters = details.get("parameters", [])
-            total_parameters += len(parameters)
+    for path, path_info in paths.items():
+        for method, operation in path_info.items():
+            if method.upper() in details["HTTP Methods Distribution"]:
+                details["HTTP Methods Distribution"][method.upper()] += 1
+                details["Total Requests/Endpoints"] += 1
 
-    return {
-        "Total Requests/Endpoints": len(endpoints),
-        "HTTP Methods Distribution": methods_distribution,
-        "Total Parameters": total_parameters
-    }
+                # Count parameters
+                total_parameters = 0
+                if "parameters" in operation:
+                    total_parameters += len(operation["parameters"])
+                if "requestBody" in operation:
+                    total_parameters += count_request_body_parameters(operation["requestBody"])
+                details["Total Parameters"] += total_parameters
 
+    return details
+
+def count_request_body_parameters(request_body):
+    """
+    Recursively count the number of parameters in the request body.
+    """
+    if "content" in request_body:
+        total_parameters = 0
+        for content_type, schema in request_body["content"].items():
+            if "schema" in schema:
+                total_parameters += count_schema_parameters(schema["schema"])
+        return total_parameters
+    return 0
+
+def count_schema_parameters(schema):
+    """
+    Recursively count the number of parameters in a schema.
+    """
+    if "properties" in schema:
+        return len(schema["properties"])
+    elif "items" in schema:
+        if "properties" in schema["items"]:
+            return len(schema["items"]["properties"])
+        elif "$ref" in schema["items"]:
+            return 1  # Assuming a referenced schema counts as one parameter
+    return 0
 
 def extract_postman_items(items_list):
     """
@@ -146,7 +165,6 @@ def extract_postman_items(items_list):
         if 'item' in item:
             requests.extend(extract_postman_items(item['item']))
     return requests
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Analyze API documentation files.')
